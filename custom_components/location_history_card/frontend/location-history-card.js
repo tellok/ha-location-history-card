@@ -3,7 +3,7 @@ const sampleColors = ["#007bc2", "#d45727", "#00866c", "#8856c9", "#b63477", "#6
 const speeds = [1, 5, 15, 60];
 const defaultMovementThreshold = 50;
 const maxMovementGap = 600;
-const tickHours = [1, 2, 3, 4, 6, 8, 12, 24];
+const tickHours = [1 / 12, 1 / 6, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 12, 24, 48, 72, 168, 336];
 const visibilityEvent = `${tag}:visibility-changed`;
 const compactTrailPoint = { radius: 2.5, stroke: 0.5 };
 const markerLabelAttribute = "location_history_marker_label";
@@ -13,13 +13,13 @@ const panelSizing = new WeakMap();
 const copy = {
   en: {
     title: "Location history", date: "Date", time: "Time", play: "Play", pause: "Pause",
-    timeline: "Timeline", speed: "Playback speed", trails: "Show trails", fit: "Fit selected time range",
+    timeline: "Timeline", speed: "Playback speed", trails: "Show paths", fit: "Fit selected time range",
     refresh: "Reload history", loading: "Loading location history…", mapError: "The Home Assistant map could not load.",
-    error: "Could not load location history.", noHistory: "No GPS history for the selected date.",
+    error: "Could not load location history.", noHistory: "No GPS history for the selected dates.",
     noPosition: "No recorded location at this time.", hidden: "Use an eye button to show a location.",
     config: "When provided, entities must be a list of person or device_tracker entities.",
     invalidTime: "This time does not exist on the selected date.",
-    rangeStart: "Playback start", rangeEnd: "Playback end", resetRange: "Reset playback range",
+    rangeStart: "Playback start", rangeEnd: "Playback end", resetRange: "Zoom out to the whole period",
     movement: "Recorded movement", noMovement: "No detected movement",
     thresholdError: "movement_threshold must be a positive number in meters.",
     noEntities: "No people or device trackers are available.",
@@ -32,13 +32,13 @@ const copy = {
   },
   zh: {
     title: "位置历史", date: "日期", time: "时间", play: "播放", pause: "暂停",
-    timeline: "时间轴", speed: "播放速度", trails: "显示轨迹", fit: "聚焦选中时段",
+    timeline: "时间轴", speed: "播放速度", trails: "显示路径", fit: "聚焦选中时段",
     refresh: "重新读取历史", loading: "正在读取位置历史…", mapError: "无法加载 Home Assistant 地图。",
-    error: "无法读取位置历史。", noHistory: "这一天没有可用的 GPS 记录。",
+    error: "无法读取位置历史。", noHistory: "所选日期没有可用的 GPS 记录。",
     noPosition: "这个时间点还没有位置记录。", hidden: "点击眼睛按钮显示实体位置。",
     config: "entities 如有填写，必须是 person 或 device_tracker 实体列表。",
     invalidTime: "所选日期没有这个时间。",
-    rangeStart: "回放起点", rangeEnd: "回放终点", resetRange: "重置回放范围",
+    rangeStart: "回放起点", rangeEnd: "回放终点", resetRange: "缩小到整个时段",
     movement: "移动记录", noMovement: "未检测到移动",
     thresholdError: "movement_threshold 必须是以米为单位的正数。",
     noEntities: "没有可用的人员或设备追踪器。",
@@ -79,7 +79,8 @@ template.innerHTML = `
     .field { gap: 6px; font-size: var(--ha-font-size-s, 13px); color: var(--secondary-text-color); }
     .field ha-input { --ha-input-padding-bottom: 0px; }
     #date { inline-size: 9rem; }
-    #time { inline-size: 8.25rem; }
+    #date-field[hidden], #dates[hidden] { display: none; }
+    #dates { flex: 1 1 100%; min-inline-size: 0; max-inline-size: 100%; }
     #speed-button { --ha-button-border-radius: var(--ha-border-radius-md); }
     #speed-button ha-icon { --mdc-icon-size: 16px; }
     button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
@@ -167,8 +168,8 @@ template.innerHTML = `
     <div class="controls">
       <div class="toolbar">
         <h2 class="title" hidden></h2>
-        <div class="field"><span id="date-label"></span><ha-input id="date" appearance="outlined" type="date"></ha-input></div>
-        <div class="field"><span id="time-label"></span><ha-input id="time" appearance="outlined" type="time" step="1"></ha-input></div>
+        <ha-date-range-picker id="dates" hidden></ha-date-range-picker>
+        <div class="field" id="date-field"><span id="date-label"></span><ha-input id="date" appearance="outlined" type="date"></ha-input></div>
         <div class="playback-controls">
           <ha-button id="play" appearance="accent" size="s"><ha-icon slot="start"></ha-icon><span></span></ha-button>
           <ha-dropdown id="speed" placement="bottom-start">
@@ -221,6 +222,11 @@ function createClock(zone, locale) {
   const tick = new Intl.DateTimeFormat(locale, {
     timeZone: zone, hour: "numeric", minute: "2-digit",
   });
+  // Used when the window spans more than a day, so times say which day they are on.
+  const displayDay = new Intl.DateTimeFormat(locale, {
+    timeZone: zone, weekday: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+  });
+  const tickDay = new Intl.DateTimeFormat(locale, { timeZone: zone, weekday: "short", day: "numeric" });
   const utcDate = (key) => Date.parse(`${key}T00:00:00Z`) / 1000;
   const dateAt = (second) => date.format(second * 1000);
   const timeAt = (second) => time.format(second * 1000);
@@ -237,24 +243,14 @@ function createClock(zone, locale) {
   }
 
   return {
-    dateAt, timeAt, display, tick,
-    window(key, now) {
+    dateAt, timeAt, display, tick, displayDay, tickDay,
+    // The whole local day for a YYYY-MM-DD key, as [start, end) seconds.
+    day(key) {
       const nextKey = new Date((utcDate(key) + 86400) * 1000).toISOString().slice(0, 10);
-      const start = midnight(key);
-      const end = midnight(nextKey);
-      return { start, end, last: Math.min(end - 1, now) };
+      return { start: midnight(key), end: midnight(nextKey) };
     },
-    atTime(key, value, { start, end }, cursor) {
-      if (!value) return undefined;
-      const target = value.length === 5 ? `${value}:00` : value;
-      const wanted = Date.parse(`${key}T${target}Z`) / 1000;
-      // Try offsets on both sides of a daylight-saving transition. For a repeated
-      // wall time, keep the occurrence closest to the current timeline position.
-      const offsets = new Set([start, end - 1].map((second) =>
-        Date.parse(`${dateAt(second)}T${timeAt(second)}Z`) / 1000 - second));
-      return [...offsets].map((offset) => wanted - offset)
-        .filter((second) => second >= start && second < end && timeAt(second) === target)
-        .sort((a, b) => Math.abs(a - cursor) - Math.abs(b - cursor))[0];
+    window({ start, end }, now) {
+      return { start, end, last: Math.max(start, Math.min(end - 1, now)) };
     },
   };
 }
@@ -562,6 +558,24 @@ async function loadNativeMap() {
   }
 }
 
+async function loadDateRangePicker() {
+  if (customElements.get("ha-date-range-picker")) return;
+  await customElements.whenDefined("hui-card");
+  // The energy date selection card bundles Home Assistant's date range picker.
+  const loader = document.createElement("hui-card");
+  loader.config = { type: "energy-date-selection" };
+  loader.load();
+  let timeout;
+  try {
+    await Promise.race([
+      customElements.whenDefined("ha-date-range-picker"),
+      new Promise((_, reject) => { timeout = setTimeout(reject, 12000); }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function styleTrailPoints(engine) {
   const compact = window.matchMedia("(max-width: 620px), (pointer: coarse) and (max-width: 950px)");
   // HA's map component does not expose trail sizing. Adjust only the native
@@ -633,8 +647,9 @@ class LocationHistoryCard extends HTMLElement {
   #nodes;
   #clock;
   #zone;
-  #day;
+  #period;
   #window;
+  #view;
   #cursor;
   #range;
   #drag;
@@ -660,6 +675,8 @@ class LocationHistoryCard extends HTMLElement {
   #preview = false;
   #stopPanelSizing;
   #tickResize = new ResizeObserver(() => this.#renderTicks());
+  #linesHooked;
+  #lineOpacity = new WeakMap();
 
   constructor() {
     super();
@@ -681,25 +698,26 @@ class LocationHistoryCard extends HTMLElement {
       publish(this.#markerStates);
     });
 
-    const { date, time, play, speed, trails, fit, refresh } = this.#nodes;
+    const { date, dates, play, speed, trails, fit, refresh } = this.#nodes;
     const timelineArea = this.#nodes["timeline-area"];
     date.addEventListener("change", () => {
-      if (!date.value || date.value > date.max) { date.value = this.#day; return; }
-      this.#day = date.value;
+      const today = this.#clock.dateAt(this.#now());
+      if (!date.value || date.value > today) { date.value = this.#clock.dateAt(this.#period.start); return; }
+      this.#period = this.#clock.day(date.value);
       this.#loadHistory();
     });
-    time.addEventListener("change", () => {
-      if (!this.#window) return;
-      const second = this.#clock.atTime(this.#day, time.value, this.#window, this.#cursor);
-      if (second === undefined) {
-        time.invalid = true;
-        time.value = this.#clock.timeAt(Math.floor(this.#cursor));
-        return;
-      }
-      this.#seek(second);
+    // Home Assistant's date range picker (presets, previous / next): any span of whole days.
+    dates.extendedPresets = true;
+    dates.timePicker = false;
+    dates.addEventListener("value-changed", (event) => {
+      const { startDate, endDate } = event.detail?.value ?? {};
+      if (!(startDate instanceof Date) || !(endDate instanceof Date)) return;
+      const start = Math.floor(startDate.getTime() / 1000);
+      const end = Math.ceil(endDate.getTime() / 1000);
+      if (!(end > start) || start > this.#now()) return;
+      this.#period = { start, end };
+      this.#loadHistory();
     });
-    time.addEventListener("input", () => { time.invalid = false; });
-    time.addEventListener("focusin", () => this.#pause());
     speed.addEventListener("wa-select", (event) => {
       const selected = Number(event.detail.item.value);
       if (!speeds.includes(selected)) return;
@@ -709,7 +727,12 @@ class LocationHistoryCard extends HTMLElement {
     timelineArea.addEventListener("pointerdown", this.#startDrag);
     timelineArea.addEventListener("pointermove", this.#moveDrag);
     timelineArea.addEventListener("pointerup", this.#moveDrag);
-    timelineArea.addEventListener("lostpointercapture", () => { this.#drag = undefined; });
+    timelineArea.addEventListener("lostpointercapture", () => {
+      const kind = this.#drag?.kind;
+      this.#drag = undefined;
+      // Letting go of a start / end handle zooms the timeline (and the map) into the chosen stretch.
+      if (kind === "start" || kind === "end") this.#setView({ start: this.#range.start, last: this.#range.end });
+    });
     timelineArea.addEventListener("keydown", this.#handleTimelineKey);
     this.#nodes.timeline.addEventListener("blur", (event) => {
       event.currentTarget.removeAttribute("data-pointer-focus");
@@ -717,10 +740,10 @@ class LocationHistoryCard extends HTMLElement {
     this.#nodes["reset-range"].addEventListener("click", () => {
       this.#pause();
       this.#range = { start: this.#window.start, end: this.#window.last };
-      this.#renderFrame();
+      this.#setView({ start: this.#window.start, last: this.#window.last });
     });
     play.addEventListener("click", () => this.#animation === undefined ? this.#start() : this.#pause());
-    trails.addEventListener("change", () => this.#renderFrame());
+    trails.addEventListener("change", () => this.#applyLines());
     fit.addEventListener("click", () => this.#fit(false));
     refresh.addEventListener("click", () => {
       this.#attachMap();
@@ -792,8 +815,7 @@ class LocationHistoryCard extends HTMLElement {
     const { entitiesChanged, defaultsChanged } = this.#syncEntities();
     if (zoneChanged) {
       this.#zone = zone;
-      this.#nodes.time.title = zone;
-      this.#day = this.#clock.dateAt(this.#now());
+      this.#period = this.#clock.day(this.#clock.dateAt(this.#now()));
       if (this.isConnected) this.#loadHistory();
     } else if (this.isConnected && (entitiesChanged || (wasConnected === false && hass.connected))) {
       this.#loadHistory({ keepTime: true });
@@ -843,6 +865,7 @@ class LocationHistoryCard extends HTMLElement {
     this.#updateManageButton();
     this.#tickResize.observe(this.#nodes["tick-grid"]);
     if (this.#clock && this.#config) this.#loadHistory({ keepTime: true });
+    this.#attachPicker();
     this.#attachMap();
   }
 
@@ -860,6 +883,16 @@ class LocationHistoryCard extends HTMLElement {
   }
 
   #now() { return Math.floor(Date.now() / 1000); }
+
+  async #attachPicker() {
+    try {
+      await loadDateRangePicker();
+      this.#nodes.dates.hidden = false;
+      this.#nodes["date-field"].hidden = true;
+    } catch {
+      // Keep the plain single-day date field.
+    }
+  }
 
   async #attachMap() {
     if (this.#map) return;
@@ -894,21 +927,28 @@ class LocationHistoryCard extends HTMLElement {
     const oldCursor = this.#cursor;
     const oldLast = this.#window?.last;
     const oldRange = this.#range;
+    const oldView = this.#view;
     const now = this.#now();
-    const today = this.#clock.dateAt(now);
-    this.#nodes.date.max = today;
-    this.#nodes.date.value = this.#day;
-    this.#nodes.time.invalid = false;
-    this.#window = this.#clock.window(this.#day, now);
+    this.#nodes.date.max = this.#clock.dateAt(now);
+    this.#nodes.date.value = this.#clock.dateAt(this.#period.start);
+    this.#nodes.dates.startDate = new Date(this.#period.start * 1000);
+    this.#nodes.dates.endDate = new Date(this.#period.end * 1000 - 1);
+    this.#window = this.#clock.window(this.#period, now);
     const { start, end, last } = this.#window;
     const rangeEnd = keepTime && oldRange && oldRange.end !== oldLast ? clamp(oldRange.end, start, last) : last;
     this.#range = {
       start: keepTime && oldRange ? clamp(oldRange.start, start, rangeEnd) : start,
       end: rangeEnd,
     };
-    this.#cursor = keepTime && oldCursor !== undefined && !(this.#day === today && oldCursor === oldLast)
+    // The timeline shows the whole period, or the stretch it was zoomed into (kept on refresh).
+    this.#view = {
+      start: keepTime && oldView ? clamp(oldView.start, start, this.#range.start) : start,
+      last: keepTime && oldView && oldView.last !== oldLast ? clamp(oldView.last, this.#range.end, last) : last,
+    };
+    // Start at the end of the range so every trail in it is drawn; Play replays from the start.
+    this.#cursor = keepTime && oldCursor !== undefined && oldCursor !== oldLast
       ? clamp(oldCursor, this.#range.start, this.#range.end)
-      : (this.#day === today ? last : start);
+      : this.#range.end;
     const entityIds = this.#entities;
     this.#status = entityIds.length ? "loading" : "";
     this.#history.clear();
@@ -956,10 +996,7 @@ class LocationHistoryCard extends HTMLElement {
     this.#nodes.title.textContent = title;
     this.#nodes.title.hidden = !title;
     this.#nodes["date-label"].textContent = text.date;
-    this.#nodes["time-label"].textContent = text.time;
     this.#nodes.date.accessibleLabel = text.date;
-    this.#nodes.time.accessibleLabel = text.time;
-    this.#nodes.time.validationMessage = text.invalidTime;
     this.#nodes.trails.textContent = text.trails;
     this.#nodes.timeline.setAttribute("aria-label", text.timeline);
     this.#nodes["range-start"].setAttribute("aria-label", text.rangeStart);
@@ -1126,7 +1163,8 @@ class LocationHistoryCard extends HTMLElement {
       const description = intervals.length ? this.#text.movement : this.#text.noMovement;
       track.title = `${this.#text[this.#status] ?? description} · ${threshold}`;
       track.setAttribute("aria-label", track.title);
-      track.replaceChildren(...intervals.map(({ start, end }) => {
+      const { start: viewStart, last: viewLast } = this.#view;
+      track.replaceChildren(...intervals.filter(({ start, end }) => end >= viewStart && start <= viewLast).map(({ start, end }) => {
         const segment = document.createElement("span");
         segment.className = "movement-segment";
         const startPercent = this.#percent(start);
@@ -1141,29 +1179,35 @@ class LocationHistoryCard extends HTMLElement {
   }
 
   #percent(second) {
-    const { start, last } = this.#window;
+    const { start, last } = this.#view;
     return last === start ? 0 : clamp((second - start) * 100 / (last - start), 0, 100);
   }
 
-  #display(second) { return this.#clock.display.format(second * 1000); }
+  #multiDay() { return this.#view && this.#view.last - this.#view.start > 26 * 3600; }
+
+  #display(second) {
+    return (this.#multiDay() ? this.#clock.displayDay : this.#clock.display).format(second * 1000);
+  }
 
   #renderTicks() {
     if (!this.#window) return;
     const grid = this.#nodes["tick-grid"];
     const width = grid.clientWidth;
     if (!width) return;
-    const { start, last } = this.#window;
+    const { start, last } = this.#view;
     const span = last - start;
     const hours = tickHours.find((step) => width * step * 3600 >= 72 * span);
     const period = (hours ?? 24) * 3600;
     const ticks = [];
-    for (let second = start; second <= last; second += period) {
+    // Ticks stay on the period's own hours (it starts at local midnight) when zoomed in.
+    const first = start + (period - (start - this.#window.start) % period) % period;
+    for (let second = first; second <= last; second += period) {
       const tick = document.createElement("div");
       tick.className = "time-tick";
       tick.style.left = `${this.#percent(second)}%`;
-      if (second === start || width * (last - second) >= 36 * span) {
+      if (second === first || width * (last - second) >= 36 * span) {
         const label = document.createElement("span");
-        label.textContent = this.#clock.tick.format(second * 1000);
+        label.textContent = (period >= 86400 ? this.#clock.tickDay : this.#clock.tick).format(second * 1000);
         tick.append(label);
       }
       ticks.push(tick);
@@ -1171,9 +1215,20 @@ class LocationHistoryCard extends HTMLElement {
     grid.replaceChildren(...ticks);
   }
 
+  #setView(view) {
+    if (!this.#window) return;
+    const changed = view.start !== this.#view?.start || view.last !== this.#view?.last;
+    this.#view = view;
+    this.#cursor = clamp(this.#cursor, this.#range.start, this.#range.end);
+    this.#renderMovement();
+    this.#renderTicks();
+    this.#renderFrame();
+    if (changed) this.#fit(false);
+  }
+
   #limits(kind) {
-    if (kind === "start") return [this.#window.start, this.#range.end - 1];
-    if (kind === "end") return [this.#range.start + 1, this.#window.last];
+    if (kind === "start") return [this.#view.start, this.#range.end - 1];
+    if (kind === "end") return [this.#range.start + 1, this.#view.last];
     return [this.#range.start, this.#range.end];
   }
 
@@ -1217,7 +1272,7 @@ class LocationHistoryCard extends HTMLElement {
     if (this.#drag?.pointerId !== event.pointerId) return;
     const bounds = this.#nodes.trim.getBoundingClientRect();
     if (!bounds.width) return;
-    const { start, last } = this.#window;
+    const { start, last } = this.#view;
     const fraction = clamp((event.clientX - bounds.left - this.#drag.offset) / bounds.width, 0, 1);
     const second = start + Math.round(fraction * (last - start));
     if (this.#drag.kind === "cursor") {
@@ -1248,8 +1303,6 @@ class LocationHistoryCard extends HTMLElement {
   #seek(second) {
     this.#pause();
     this.#cursor = clamp(second, this.#range.start, this.#range.end);
-    this.#nodes.time.invalid = false;
-    this.#nodes.time.value = this.#clock.timeAt(Math.floor(this.#cursor));
     this.#renderFrame();
   }
 
@@ -1264,8 +1317,9 @@ class LocationHistoryCard extends HTMLElement {
   #tick = (time) => {
     const elapsed = Math.min(250, time - this.#lastTick) / 1000;
     this.#lastTick = time;
-    // At 1×, advance one historical minute per real second.
-    this.#cursor = Math.min(this.#range.end, this.#cursor + elapsed * 60 * this.#playbackSpeed);
+    // At 1×, advance one historical minute per real second for each day shown.
+    const days = Math.max(1, Math.round((this.#view.last - this.#view.start) / 86400));
+    this.#cursor = Math.min(this.#range.end, this.#cursor + elapsed * 60 * days * this.#playbackSpeed);
     if (this.#cursor === this.#range.end) this.#pause();
     else this.#animation = requestAnimationFrame(this.#tick);
     this.#renderFrame();
@@ -1319,7 +1373,8 @@ class LocationHistoryCard extends HTMLElement {
       control.setAttribute("aria-valuenow", String(value));
       control.setAttribute("aria-valuetext", label);
     }
-    nodes["reset-range"].disabled = disabled || (start === this.#window.start && end === this.#window.last);
+    nodes["reset-range"].disabled = disabled || (start === this.#window.start && end === this.#window.last &&
+      this.#view.start === this.#window.start && this.#view.last === this.#window.last);
   }
 
   #renderFrame() {
@@ -1327,7 +1382,6 @@ class LocationHistoryCard extends HTMLElement {
     const { start, last } = this.#window;
     const now = Math.floor(this.#cursor);
     const nodes = this.#nodes;
-    if (nodes.time !== this.shadowRoot.activeElement) nodes.time.value = this.#clock.timeAt(now);
     this.#renderTimeline(now, Boolean(this.#status) || last <= start);
 
     const shown = this.#entities.filter((id) => this.#visible(id));
@@ -1336,7 +1390,7 @@ class LocationHistoryCard extends HTMLElement {
       const day = series?.day ?? [];
       const markerCount = countThrough(day, now);
       const marker = day[markerCount - 1] ?? series?.baseline;
-      const trail = nodes.trails.checked ? series?.trail : undefined;
+      const trail = series?.trail;
       return {
         id, trail, day,
         first: trail ? countThrough(trail, this.#range.start, false) : 0,
@@ -1358,7 +1412,7 @@ class LocationHistoryCard extends HTMLElement {
     nodes.message.hidden = !status;
     nodes.play.disabled = !hasHistory || this.#range.end <= this.#range.start || Boolean(this.#status);
     nodes.refresh.disabled = this.#status === "loading";
-    nodes.time.disabled = Boolean(this.#status);
+    nodes.dates.disabled = this.#status === "loading";
     if (!this.#map) {
       nodes.fit.disabled = true;
       return;
@@ -1416,12 +1470,43 @@ class LocationHistoryCard extends HTMLElement {
         }
       }
       this.#map.paths = [...context, ...selected];
+      requestAnimationFrame(() => this.#applyLines());
     }
     nodes.fit.disabled = !entries.some(({ fitStart, fitEnd }) => fitEnd > fitStart);
     this.#frame = entries;
   }
 
   #color(id) { return sampleColors[this.#entities.indexOf(id) % sampleColors.length]; }
+
+  // "Show paths" off: hide the lines between the recorded points and keep the points.
+  // The native map draws each path as a line layer and a point layer, so only the line
+  // layers are hidden (and re-hidden whenever the map rebuilds its style).
+  #applyLines() {
+    const engine = this.#map?._engine;
+    const show = this.#nodes.trails.checked;
+    const map = engine?._map;
+    if (map?.getStyle && map.setLayoutProperty) {
+      if (!this.#linesHooked) {
+        this.#linesHooked = map;
+        map.on("styledata", () => this.#applyLines());
+      }
+      const want = show ? "visible" : "none";
+      for (const layer of map.getStyle()?.layers ?? []) {
+        if (!/^ha-map-path-\d+-lines$/.test(layer.id)) continue;
+        if ((map.getLayoutProperty(layer.id, "visibility") ?? "visible") !== want) {
+          map.setLayoutProperty(layer.id, "visibility", want);
+        }
+      }
+      return;
+    }
+    const leaflet = engine?.leafletMap;
+    if (!leaflet?.eachLayer) return;
+    leaflet.eachLayer((layer) => {
+      if (!layer.getLatLngs || layer.getRadius || !layer.setStyle) return;
+      if (!this.#lineOpacity.has(layer)) this.#lineOpacity.set(layer, layer.options.opacity ?? 1);
+      layer.setStyle({ opacity: show ? this.#lineOpacity.get(layer) : 0 });
+    });
+  }
 
   #fit(wholeDay) {
     if (!this.#map || !this.#frame) return;

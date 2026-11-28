@@ -75,6 +75,8 @@ movement_threshold: 50
 show_trails: true
 ```
 
+Use the date range picker above the timeline to choose one day or many (Today, Yesterday, This week and the other presets, or any dates on the calendar). All trails in the range are drawn at once; press **Play** to replay them from the start of the range.
+
 `movement_threshold` is the minimum displacement in metres used to identify movement periods on the timeline. The map draws consecutive distinct Recorder positions with straight lines. The available dates and coordinates depend on your Recorder retention and what your trackers report.
 
 Licensed under the [MIT License](LICENSE).
